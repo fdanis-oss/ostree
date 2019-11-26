@@ -36,6 +36,8 @@
 #include "libglnx.h"
 #include "ostree-varint.h"
 #include "bsdiff/bsdiff.h"
+#include "ostree-autocleanups.h"
+#include "ostree-sign.h"
 
 #define CONTENT_SIZE_SIMILARITY_THRESHOLD_PERCENT (30)
 
@@ -1368,6 +1370,11 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
   g_autoptr(GPtrArray) builder_fallback_objects = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
   g_auto(GLnxTmpfile) descriptor_tmpf = { 0, };
   g_autoptr(OtVariantBuilder) descriptor_builder = NULL;
+  g_autofree char *detached_key = NULL;
+  const char *opt_sign_name;
+  const char **opt_key_ids;
+  const gchar *signature_key = NULL;
+  g_autoptr(GVariantBuilder) signature_builder = NULL;
 
   if (!g_variant_lookup (params, "min-fallback-size", "u", &min_fallback_size))
     min_fallback_size = 4;
@@ -1406,6 +1413,12 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
 
   if (!g_variant_lookup (params, "filename", "^&ay", &opt_filename))
     opt_filename = NULL;
+
+  if (!g_variant_lookup (params, "sign-key-ids", "^a&s", &opt_key_ids))
+    opt_key_ids = NULL;
+
+  if (!g_variant_lookup (params, "sign-name", "^&ay", &opt_sign_name))
+    opt_sign_name = NULL;
 
   if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_COMMIT, to,
                                  &to_commit, error))
@@ -1446,6 +1459,106 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
                                       &descriptor_tmpf, error))
     return FALSE;
 
+  guint8 endianness_char;
+  switch (endianness)
+    {
+      case G_LITTLE_ENDIAN:
+        endianness_char = 'l';
+        break;
+      case G_BIG_ENDIAN:
+        endianness_char = 'B';
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+
+  if (!get_fallback_headers (self, &builder, &fallback_headers,
+                             cancellable, error))
+    return FALSE;
+
+  if (!ostree_repo_read_commit_detached_metadata (self, to, &detached, cancellable, error))
+    return FALSE;
+
+  if (detached)
+    detached_key = _ostree_get_relative_static_delta_path (from, to, "commitmeta");
+
+  GDateTime *now = g_date_time_new_now_utc ();
+  /* floating */ GVariant *from_csum_v =
+    from ? ostree_checksum_to_bytes_v (from) : ot_gvariant_new_bytearray ((guchar *)"", 0);
+  /* floating */ GVariant *to_csum_v =
+    ostree_checksum_to_bytes_v (to);
+
+  /* NOTE: Build GVariant used to sign the superblock, i.e. all the superblock
+   * data except inline commits.
+   */
+  if (opt_sign_name != NULL && opt_key_ids != NULL)
+    {
+      g_autoptr(GVariantBuilder) desc_sign_builder = NULL;
+      g_autoptr(OstreeSign) sign = NULL;
+
+      part_headers = g_variant_builder_new (G_VARIANT_TYPE ("a" OSTREE_STATIC_DELTA_META_ENTRY_FORMAT));
+      for (i = 0; i < builder.parts->len; i++)
+        {
+          OstreeStaticDeltaPartBuilder *part_builder = builder.parts->pdata[i];
+          g_variant_builder_add_value (part_headers, part_builder->header);
+        }
+
+      desc_sign_builder = g_variant_builder_new (G_VARIANT_TYPE (OSTREE_STATIC_DELTA_SUPERBLOCK_FORMAT));
+      g_variant_builder_open (desc_sign_builder, G_VARIANT_TYPE ("a{sv}"));
+      if (metadata != NULL)
+        {
+          GVariantIter iter;
+          GVariant *item;
+
+          g_variant_iter_init (&iter, metadata);
+          while ((item = g_variant_iter_next_value (&iter)))
+            {
+              g_variant_builder_add_value(desc_sign_builder, item);
+              g_variant_unref (item);
+            }
+        }
+      g_variant_builder_add(desc_sign_builder, "{sv}", "ostree.endianness", g_variant_new_byte (endianness_char));
+      if (detached)
+        g_variant_builder_add(desc_sign_builder, "{sv}", detached_key, detached);
+      g_variant_builder_close(desc_sign_builder);
+
+      g_variant_builder_add(desc_sign_builder, "t", GUINT64_TO_BE (g_date_time_to_unix (now)));
+      g_variant_builder_add_value(desc_sign_builder, g_variant_ref(from_csum_v));
+      g_variant_builder_add_value(desc_sign_builder, g_variant_ref(to_csum_v));
+      g_variant_builder_add_value(desc_sign_builder, g_variant_ref(to_commit));
+      g_variant_builder_add_value(desc_sign_builder, ot_gvariant_new_bytearray ((guchar*)"", 0));
+      g_variant_builder_add_value(desc_sign_builder, g_variant_builder_end (part_headers));
+      g_variant_builder_add_value(desc_sign_builder, g_variant_ref(fallback_headers));
+      g_autoptr (GVariant) desc_sign_v = g_variant_builder_end (desc_sign_builder);
+
+      sign = ostree_sign_get_by_name (opt_sign_name, error);
+      if (sign == NULL)
+        return FALSE;
+
+      signature_key = ostree_sign_metadata_key (sign);
+      const gchar *signature_format = ostree_sign_metadata_format (sign);
+
+      signature_builder = g_variant_builder_new (G_VARIANT_TYPE (signature_format));
+
+      for (const char **iter = opt_key_ids; iter && *iter; iter++)
+        {
+          const char *keyid = *iter;
+          g_autoptr (GVariant) secret_key = NULL;
+          g_autoptr(GBytes) signature_bytes = NULL;
+
+          secret_key = g_variant_new_string (keyid);
+          if (!ostree_sign_set_sk (sign, secret_key, error))
+              return FALSE;
+
+          g_autoptr(GBytes) tmpdata = g_variant_get_data_as_bytes(desc_sign_v);
+          if (!ostree_sign_data (sign, tmpdata, &signature_bytes,
+                                 NULL, error))
+            return FALSE;
+
+          g_variant_builder_add (signature_builder, "@ay", ot_gvariant_new_ay_bytes (signature_bytes));
+        }
+    }
+
   descriptor_builder = ot_variant_builder_new (G_VARIANT_TYPE (OSTREE_STATIC_DELTA_SUPERBLOCK_FORMAT), descriptor_tmpf.fd);
 
   /* Open the metadata dict */
@@ -1470,22 +1583,8 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
         }
     }
 
-  { guint8 endianness_char;
-
-    switch (endianness)
-      {
-      case G_LITTLE_ENDIAN:
-        endianness_char = 'l';
-        break;
-      case G_BIG_ENDIAN:
-        endianness_char = 'B';
-        break;
-      default:
-        g_assert_not_reached ();
-      }
-    if (!ot_variant_builder_add (descriptor_builder, error, "{sv}", "ostree.endianness", g_variant_new_byte (endianness_char)))
-      return FALSE;
-  }
+  if (!ot_variant_builder_add (descriptor_builder, error, "{sv}", "ostree.endianness", g_variant_new_byte (endianness_char)))
+    return FALSE;
 
   part_headers = g_variant_builder_new (G_VARIANT_TYPE ("a" OSTREE_STATIC_DELTA_META_ENTRY_FORMAT));
   part_temp_paths = g_ptr_array_new_with_free_func ((GDestroyNotify)glnx_tmpfile_clear);
@@ -1525,17 +1624,16 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
       total_uncompressed_size += part_builder->uncompressed_size;
     }
 
-  if (!get_fallback_headers (self, &builder, &fallback_headers,
-                             cancellable, error))
-    return FALSE;
-
-  if (!ostree_repo_read_commit_detached_metadata (self, to, &detached, cancellable, error))
-    return FALSE;
-
   if (detached)
     {
-      g_autofree char *detached_key = _ostree_get_relative_static_delta_path (from, to, "commitmeta");
       if (!ot_variant_builder_add (descriptor_builder, error, "{sv}", detached_key, detached))
+        return FALSE;
+    }
+
+  if (signature_key)
+    {
+      if (!ot_variant_builder_add (descriptor_builder, error, "{sv}",
+                                   signature_key, g_variant_builder_end(signature_builder)))
         return FALSE;
     }
 
@@ -1545,13 +1643,6 @@ ostree_repo_static_delta_generate (OstreeRepo                   *self,
 
   /* Generate OSTREE_STATIC_DELTA_SUPERBLOCK_FORMAT */
   {
-    GDateTime *now = g_date_time_new_now_utc ();
-    /* floating */ GVariant *from_csum_v =
-      from ? ostree_checksum_to_bytes_v (from) : ot_gvariant_new_bytearray ((guchar *)"", 0);
-    /* floating */ GVariant *to_csum_v =
-      ostree_checksum_to_bytes_v (to);
-
-
     if (!ot_variant_builder_add (descriptor_builder, error, "t",
                                  GUINT64_TO_BE (g_date_time_to_unix (now))) ||
         !ot_variant_builder_add_value (descriptor_builder,
