@@ -40,6 +40,8 @@ static gboolean opt_swap_endianness;
 static gboolean opt_inline;
 static gboolean opt_disable_bsdiff;
 static gboolean opt_if_not_exists;
+static char **opt_key_ids;
+static char *opt_sign_name;
 
 #define BUILTINPROTO(name) static gboolean ot_static_delta_builtin_ ## name (int argc, char **argv, OstreeCommandInvocation *invocation, GCancellable *cancellable, GError **error)
 
@@ -88,6 +90,8 @@ static GOptionEntry generate_options[] = {
   { "max-bsdiff-size", 0, 0, G_OPTION_ARG_STRING, &opt_max_bsdiff_size, "Maximum size in megabytes to consider bsdiff compression for input files", NULL},
   { "max-chunk-size", 0, 0, G_OPTION_ARG_STRING, &opt_max_chunk_size, "Maximum size of delta chunks in megabytes", NULL},
   { "filename", 0, 0, G_OPTION_ARG_FILENAME, &opt_filename, "Write the delta content to PATH (a directory).  If not specified, the OSTree repository is used", "PATH"},
+  { "sign", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_key_ids, "Sign the delta with", "KEY_ID"},
+  { "sign-type", 0, 0, G_OPTION_ARG_STRING, &opt_sign_name, "Signature type to use (defaults to 'ed25519')", "NAME"},
   { NULL }
 };
 
@@ -325,6 +329,20 @@ ot_static_delta_builtin_generate (int argc, char **argv, OstreeCommandInvocation
       g_variant_builder_add (parambuilder, "{sv}", "verbose", g_variant_new_boolean (TRUE));
       if (opt_endianness || opt_swap_endianness)
         g_variant_builder_add (parambuilder, "{sv}", "endianness", g_variant_new_uint32 (endianness));
+
+      if (opt_key_ids) {
+        g_autoptr(GPtrArray) key_ids = g_ptr_array_new ();
+        for (char **iter = opt_key_ids; iter != NULL && *iter != NULL; ++iter)
+          g_ptr_array_add (key_ids, *iter);
+        g_autoptr(GVariant) key_ids_v = g_variant_new_strv ((const char *const *)key_ids->pdata,
+                                                            key_ids->len);
+        g_variant_builder_add (parambuilder, "{s@v}", "sign-key-ids",
+                               g_variant_new_variant (g_steal_pointer (&key_ids_v)));
+      }
+      if (!opt_sign_name)
+        opt_sign_name = "ed25519";
+      g_variant_builder_add (parambuilder, "{sv}", "sign-name",
+                             g_variant_new_bytestring (opt_sign_name));
 
       g_print ("Generating static delta:\n");
       g_print ("  From: %s\n", from_resolved ? from_resolved : "empty");
