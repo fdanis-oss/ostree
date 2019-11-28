@@ -36,6 +36,8 @@ global:
   ostree_sign_add_pk;
   ostree_sign_set_sk;
   ostree_sign_summary;
+  ostree_repo_static_delta_is_signed;
+  ostree_repo_static_delta_verify_signature;
 } LIBOSTREE_2020.1;
 
 /* Stub section for the stable release *after* this development one; don't
