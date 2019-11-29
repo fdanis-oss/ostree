@@ -28,7 +28,10 @@ skip_without_user_xattrs
 bindatafiles="bash true ostree"
 morebindatafiles="false ls"
 
-echo '1..12'
+echo '1..15'
+
+# This is explicitly opt in for testing
+export OSTREE_DUMMY_SIGN_ENABLED=1
 
 mkdir repo
 ostree_repo_init repo --mode=archive
@@ -266,3 +269,39 @@ fi
 assert_file_has_content err.txt "Invalid rev GARBAGE"
 
 echo 'ok handle bad delta name'
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} dummysign > show-not-signed.txt
+assert_file_has_content show-not-signed.txt "Not signed"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} dummysign > show-inline-not-signed.txt
+assert_file_has_content show-inline-not-signed.txt "Not signed"
+
+echo 'ok verify ok with unsigned deltas'
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=dummy --sign=dummysign
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} dummysign > show-dummy-signed.txt
+assert_file_has_content show-dummy-signed.txt "Verification OK"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=dummy --sign=dummysign
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} dummysign > show-dummy-inline-signed.txt
+assert_file_has_content show-dummy-inline-signed.txt "Verification OK"
+
+echo 'ok verified with dummy'
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=dummy --sign=dummysign
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} badsign > show-dummy-bad-signed.txt && exit 1
+assert_file_has_content show-dummy-bad-signed.txt "Verification fails"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=dummy --sign=dummysign
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev}-${newrev} badsign > show-dummy-bad-inline-signed.txt && exit 1
+assert_file_has_content show-dummy-bad-inline-signed.txt "Verification fails"
+
+echo 'ok verification failed with dummy and bad key'
