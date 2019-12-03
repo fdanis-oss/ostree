@@ -28,7 +28,7 @@ skip_without_user_xattrs
 bindatafiles="bash true ostree"
 morebindatafiles="false ls"
 
-echo '1..15'
+echo '1..19'
 
 # This is explicitly opt in for testing
 export OSTREE_DUMMY_SIGN_ENABLED=1
@@ -305,3 +305,92 @@ ${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=dummy ${origrev
 assert_file_has_content show-dummy-bad-inline-signed.txt "Verification fails"
 
 echo 'ok verification failed with dummy and bad key'
+
+if ! has_libsodium; then
+    echo "ok verified with ed25519 (key) # SKIP due libsodium unavailability"
+    echo "ok Verification fails with ed25519 (key) and bad key # SKIP due libsodium unavailability"
+    echo "ok Verification fails with ed25519 (file) and bad keys # SKIP due libsodium unavailability"
+    echo "ok verified with ed25519 (file) # SKIP due libsodium unavailability"
+    exit 0
+fi
+
+# Test ostree sign with 'ed25519' module
+gen_ed25519_keys
+PUBLIC=${ED25519PUBLIC}
+SEED=${ED25519SEED}
+SECRET=${ED25519SECRET}
+WRONG_PUBLIC="$(gen_ed25519_random_public)"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${PUBLIC}" > show-ed25519-key-signed-1.txt
+assert_file_has_content show-ed25519-key-signed-1.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${PUBLIC}" "${WRONG_PUBLIC}" > show-ed25519-key-signed-2.txt
+assert_file_has_content show-ed25519-key-signed-2.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${WRONG_PUBLIC}" "${PUBLIC}" > show-ed25519-key-signed-3.txt
+assert_file_has_content show-ed25519-key-signed-3.txt "Verification OK"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${PUBLIC}" > show-ed25519-key-inline-signed-1.txt
+assert_file_has_content show-ed25519-key-inline-signed-1.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${PUBLIC}" "${WRONG_PUBLIC}" > show-ed25519-key-inline-signed-2.txt
+assert_file_has_content show-ed25519-key-inline-signed-2.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${WRONG_PUBLIC}" "${PUBLIC}" > show-ed25519-key-inline-signed-3.txt
+assert_file_has_content show-ed25519-key-inline-signed-3.txt "Verification OK"
+
+echo 'ok verified with ed25519 (key)'
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${WRONG_PUBLIC}" > show-ed25519-key-bad-signed.txt && exit 1
+assert_file_has_content show-ed25519-key-bad-signed.txt "Verification fails"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} "${WRONG_PUBLIC}" > show-ed25519-key-bad-inline-signed.txt && exit 1
+assert_file_has_content show-ed25519-key-bad-inline-signed.txt "Verification fails"
+
+echo 'ok Verification fails with ed25519 (key) and bad key'
+
+# Prepare files with public ed25519 signatures
+PUBKEYS="$(mktemp -p ${test_tmpdir} ed25519_XXXXXX.ed25519)"
+for((i=0;i<100;i++)); do
+    # Generate a list with some public signatures
+    gen_ed25519_random_public
+done > ${PUBKEYS}
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} > show-ed25519-file-bad-signed-1.txt && exit 1
+assert_file_has_content show-ed25519-file-bad-signed-1.txt "Verification fails"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} "${WRONG_PUBLIC}" > show-ed25519-file-bad-signed-2.txt && exit 1
+assert_file_has_content show-ed25519-file-bad-signed-2.txt "Verification fails"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} > show-ed25519-file-inline-bad-signed-1.txt && exit 1
+assert_file_has_content show-ed25519-file-inline-bad-signed-1.txt "Verification fails"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} "${WRONG_PUBLIC}" > show-ed25519-file-inline-bad-signed-2.txt && exit 1
+assert_file_has_content show-ed25519-file-inline-bad-signed-2.txt "Verification fails"
+
+echo 'ok Verification fails with ed25519 (file) and bad keys'
+
+# Add correct key into the list
+echo ${PUBLIC} >> ${PUBKEYS}
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} > show-ed25519-file-signed-1.txt
+assert_file_has_content show-ed25519-file-signed-1.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} "${WRONG_PUBLIC}" > show-ed25519-file-signed-2.txt
+assert_file_has_content show-ed25519-file-signed-2.txt "Verification OK"
+
+rm -rf repo/deltas/${deltaprefix}/${deltadir}/*
+${CMD_PREFIX} ostree --repo=repo static-delta generate --from=${origrev} --to=${newrev} --inline --sign-type=ed25519 --sign=${SECRET}
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} > show-ed25519-file-inline-signed-1.txt
+assert_file_has_content show-ed25519-file-inline-signed-1.txt "Verification OK"
+${CMD_PREFIX} ostree --repo=repo static-delta verify --sign-type=ed25519 ${origrev}-${newrev} --keys-file=${PUBKEYS} "${WRONG_PUBLIC}" > show-ed25519-file-inline-signed-2.txt
+assert_file_has_content show-ed25519-file-inline-signed-2.txt "Verification OK"
+
+echo 'ok verified with ed25519 (file)'
